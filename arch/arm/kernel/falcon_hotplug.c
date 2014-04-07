@@ -37,15 +37,16 @@
 #endif
 
 
-#define DEFAULT_FIRST_LEVEL	85
+#define DEFAULT_FIRST_LEVEL	80
 #define DEFAULT_SECOND_LEVEL	60
 #define HIGH_LOAD_COUNTER	25
-#define SAMPLING_RATE_MS	2000
-#define FALCON_DEBUG
+#define SAMPLING_RATE		10
+#define DEFAULT_MIN_ONLINE	4
+// #define FALCON_DEBUG
 
 struct cpu_stats
 {
-	unsigned int default_second_level;
+	unsigned int all_load_threshold;
 	unsigned long timestamp;
 
 	/* For the three hot-plug-able Cores */
@@ -63,12 +64,17 @@ static DEFINE_PER_CPU(struct cpu_load_data, cpuload);
 static struct cpu_stats stats;
 static struct workqueue_struct *wq;
 static struct delayed_work decide_hotplug;
-static struct workqueue_struct *pm_wq;
 static struct work_struct resume;
 static struct work_struct suspend;
 
-static unsigned long queue_sampling;
-static unsigned int default_first_level;
+/* The default sampling rate for the hotplug driver */
+static unsigned int hotplug_sampling = SAMPLING_RATE;
+
+/* The minimum amount of time for a cpu to stay online */
+static unsigned int min_online_time = DEFAULT_MIN_ONLINE;
+
+/* The first threshold level for a single cpu */
+static unsigned int single_load_threshold = DEFAULT_FIRST_LEVEL;
 
 static inline int get_cpu_load(unsigned int cpu)
 {
@@ -112,8 +118,7 @@ static int get_load_for_all_cpu(void)
 		load = load + stats.cpu_load_stats[cpu];
 	}
 	
-	load = (unsigned int) (load / num_online_cpus());	
-	return load;
+	return (load / num_online_cpus());
 }
 
 /*
@@ -123,6 +128,9 @@ static int get_load_for_all_cpu(void)
 static void calculate_load_for_cpu(int cpu) 
 {
 	struct cpufreq_policy policy;
+	int avg_load;
+
+	avg_load = get_load_for_all_cpu();
 
 	for_each_online_cpu(cpu) {
 		cpufreq_get_policy(&policy, cpu);
@@ -130,8 +138,8 @@ static void calculate_load_for_cpu(int cpu)
 		 * We are above our threshold, so update our counter for cpu.
 		 * Consider this only, if we are on our max frequency
 		 */
-		if (get_cpu_load(cpu) >= default_first_level &&
-			get_load_for_all_cpu() >= stats.default_second_level
+		if (get_cpu_load(cpu) >= single_load_threshold &&
+			avg_load >= stats.all_load_threshold
 			&& likely(stats.counter[cpu] < HIGH_LOAD_COUNTER)
 			&& cpufreq_quick_get(cpu) == policy.max) {
 				stats.counter[cpu] += 2;
@@ -157,7 +165,7 @@ static void put_cpu_down(int cpu)
 	int current_cpu = 0;
 
 	/* Prevent fast on-/offlining */ 
-	if (time_is_after_jiffies(stats.timestamp + (HZ * 4)))
+	if (time_is_after_jiffies(stats.timestamp + (HZ * min_online_time)))	
 		return;
 
 	/*
@@ -165,23 +173,48 @@ static void put_cpu_down(int cpu)
 	 */
 
 	/* No core was online anyway */
-	if ((!cpu_online(cpu) && !cpu_online(cpu + 1))
-			|| (!cpu_online(cpu - 1) && !cpu_online(cpu)))
-		return;
-
-	if ((cpu_online(cpu) && cpu_online(cpu + 1)
-			&& get_cpu_load(cpu) > get_cpu_load(cpu + 1))
-			|| (!cpu_online(cpu) && cpu_online(cpu + 1)))
-		current_cpu = cpu + 1;
-	else if (cpu_online(cpu) && cpu_online(cpu - 1)
-			&& get_cpu_load(cpu) > get_cpu_load(cpu - 1)
-			&& (cpu - 1) != 1)
-		current_cpu = cpu - 1;
-	else if ((cpu_online(cpu) && !cpu_online(cpu + 1))
-			|| (cpu_online(cpu) && !cpu_online(cpu - 1) && (cpu - 1) != 1))
-		current_cpu = cpu;
-	else
-		current_cpu = cpu;
+	if (!cpu_online(cpu)) {
+		if ((!cpu_online(cpu + 1)) || (!cpu_online(cpu - 1)))
+			return;
+	}
+	
+	switch(cpu) {
+		case 2:
+			if (cpu_online(cpu) && !cpu_online(cpu + 1)) {
+				current_cpu = cpu;
+				break;
+			} else if (!cpu_online(cpu) && cpu_online(cpu + 1)) {
+				current_cpu = cpu + 1;
+				break;
+			} else if (cpu_online(cpu) && cpu_online(cpu + 1)) {
+				if (get_cpu_load(cpu) >= get_cpu_load(cpu + 1)) {
+					current_cpu = cpu + 1;
+					break;
+				} else {
+					current_cpu = cpu;
+					break;
+				}
+			}
+		break;
+		case 3:
+			if (cpu_online(cpu - 1) && !cpu_online(cpu)) {
+				current_cpu = cpu - 1;
+				break;
+			} else if (cpu_online(cpu) && cpu_online(cpu - 1)) {
+				current_cpu = cpu;
+				break;
+			} else if (cpu_online(cpu) && cpu_online(cpu - 1)
+				&& (cpu - 1) != 1) {
+				if (get_cpu_load(cpu - 1) >= get_cpu_load(cpu)) {
+					current_cpu = cpu;
+					break;
+				} else {
+					current_cpu = cpu - 1;	
+					break;
+				}
+			}
+		break;
+	}
 
 #ifdef FALCON_DEBUG						
 	printk("[Hot-Plug]: CPU%u ready for offlining\n", current_cpu);
@@ -201,9 +234,9 @@ static void __ref decide_hotplug_func(struct work_struct *work)
 	int i, j;
 
 	/* Do load calculation for each cpu counter */
+	calculate_load_for_cpu(i);
 
 	for (i = 0, j = 2; i < 2; i++, j++) {
-		calculate_load_for_cpu(i);
 
 		if (stats.counter[i] >= 10) {
 			if (!cpu_online(j)) {
@@ -215,14 +248,14 @@ static void __ref decide_hotplug_func(struct work_struct *work)
 			}
 		}
 		else {
-			if (stats.counter[i] > 0) {
+			if (stats.counter[i] >= 0) {
 				put_cpu_down(j);	
 			}
 		}
 	}
 	
 	/* Make a dedicated work_queue */
-	queue_delayed_work_on(0, wq, &decide_hotplug, queue_sampling);
+	queue_delayed_work_on(0, wq, &decide_hotplug, msecs_to_jiffies(hotplug_sampling * HZ));
 }
 
 #ifdef CONFIG_POWERSUSPEND
@@ -235,13 +268,14 @@ static void suspend_func(struct work_struct *work)
 	cancel_delayed_work_sync(&decide_hotplug);
 	cancel_work_sync(&resume);
 
-#ifdef FALCON_DEBUG
-	pr_info("[Hot-Plug]: Early Suspend stopping Hotplug work...\n");
-#endif
-    
 	for_each_online_cpu(cpu) 
 		if (cpu)
 			cpu_down(cpu);
+
+#ifdef FALCON_DEBUG
+	pr_info("[Hot-Plug]: Early Suspend stopping Hotplug work. CPUs online: %d\n", num_online_cpus());
+#endif
+    
 }
 
 static void __ref resume_func(struct work_struct *work)
@@ -257,20 +291,20 @@ static void __ref resume_func(struct work_struct *work)
 	stats.timestamp = jiffies;
 
 #ifdef FALCON_DEBUG
-	pr_info("[Hot-Plug]: Late Resume starting Hotplug work...\n");
+	pr_info("[Hot-Plug]: Late Resume starting Hotplug work. CPUs online: %d\n", num_online_cpus());
 #endif
-	queue_delayed_work_on(0, wq, &decide_hotplug, queue_sampling);
+	queue_delayed_work_on(0, wq, &decide_hotplug, msecs_to_jiffies(hotplug_sampling * HZ));
 }
 
 static void falcon_hotplug_suspend(struct power_suspend *h)
 {
-	queue_work(pm_wq, &suspend);
+	queue_work(system_power_efficient_wq, &suspend);
 }
 
 
 static void falcon_hotplug_resume(struct power_suspend *h)
 {
-	queue_work(pm_wq, &resume);
+	queue_work(system_power_efficient_wq, &resume);
 }
 
 static struct power_suspend falcon_hotplug_power_suspend = {
@@ -283,7 +317,7 @@ static struct power_suspend falcon_hotplug_power_suspend = {
 static ssize_t show_first_threshold(struct kobject *kobj,
 					struct attribute *attr, char *buf)
 {
-	return sprintf(buf, "%u\n", default_first_level);
+	return sprintf(buf, "%u\n", single_load_threshold);
 }
 
 static ssize_t store_first_threshold(struct kobject *kobj,
@@ -294,41 +328,61 @@ static ssize_t store_first_threshold(struct kobject *kobj,
 
 	sscanf(buf, "%u", &val);
 
-	default_first_level = val;
+	single_load_threshold = val;
 	return count;
 }
 
-static struct global_attr single_core_threshold_attr = __ATTR(single_core_threshold, 0666,
+static struct global_attr single_core_threshold_attr = __ATTR(single_core_threshold, 0664,
 					show_first_threshold, store_first_threshold);
 
 static ssize_t show_sampling_rate(struct kobject *kobj,
 					struct attribute *attr, char *buf)
 {
-	return sprintf(buf, "%lu\n", queue_sampling);
+	return sprintf(buf, "%u\n", hotplug_sampling);
 }
 
 static ssize_t store_sampling_rate(struct kobject *kobj,
 					 struct attribute *attr,
 					 const char *buf, size_t count)
 {
-	int ret;
-	unsigned long val;
+	unsigned int val;
 
-	ret = strict_strtoul(buf, 0, &val);
-	if (ret < 0)
-		return ret;
+	sscanf(buf, "%u", &val);
 
-	queue_sampling = val;
+	hotplug_sampling = val;
 	return count;
 }
 
-static struct global_attr sampling_rate_attr = __ATTR(queue_sampling, 0666,
+static struct global_attr hotplug_sampling_rate_attr = __ATTR(hotplug_sampling, 0664,
 					show_sampling_rate, store_sampling_rate);
+
+static ssize_t show_min_online_time(struct kobject *kobj,
+					struct attribute *attr, char *buf)
+{
+	return sprintf(buf, "%u\n", min_online_time);
+}
+
+static ssize_t store_min_online_time(struct kobject *kobj,
+					 struct attribute *attr,
+					 const char *buf, size_t count)
+{
+	unsigned int val;
+
+	sscanf(buf, "%u", &val);
+
+	min_online_time = val;
+	return count;
+}
+
+static struct global_attr min_online_time_attr = __ATTR(min_online_time, 0664,
+					show_min_online_time, store_min_online_time);
+
 
 static struct attribute *falcon_hotplug_attributes[] = 
 {
-	&sampling_rate_attr.attr,
+	&hotplug_sampling_rate_attr.attr,
 	&single_core_threshold_attr.attr,
+	&min_online_time_attr.attr,
 	NULL
 };
 
@@ -345,11 +399,7 @@ int __init falcon_hotplug_init(void)
 #ifdef FALCON_DEBUG
 	pr_info("[Hot-Plug]: Falcon Hotplug driver started.\n");
 #endif
-    
-	/* init everything here */
-	default_first_level = DEFAULT_FIRST_LEVEL;
-	stats.default_second_level = DEFAULT_SECOND_LEVEL;
-	queue_sampling = SAMPLING_RATE_MS;
+	stats.all_load_threshold = DEFAULT_SECOND_LEVEL;
 
 	hotplug_control_kobj = kobject_create_and_add("hotplug_control", kernel_kobj);
 	if (!hotplug_control_kobj) {
@@ -376,11 +426,6 @@ int __init falcon_hotplug_init(void)
 		return -ENOMEM;
 
 #ifdef CONFIG_POWERSUSPEND
-	pm_wq = create_singlethread_workqueue("falcon_pm_workqueue");
-
-	if (!pm_wq)
-		return -ENOMEM;
-
 	register_power_suspend(&falcon_hotplug_power_suspend);
 	INIT_WORK(&resume, resume_func);
 	INIT_WORK(&suspend, suspend_func);
