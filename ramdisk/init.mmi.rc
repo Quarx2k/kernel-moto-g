@@ -16,7 +16,7 @@ on init
     # Configure coredump
     write /proc/sys/kernel/core_pattern "|/system/bin/coredump %e %p %t"
     write /proc/self/coredump_filter "0x7f"
-
+ 
     # Setup kernel dropbox permissions so that dropboxd can utilize it
     chown root diag /sys/kernel/dropbox/event
     chown root diag /sys/kernel/dropbox/data
@@ -106,6 +106,7 @@ on post-fs-data
 
     # Setup folders for diag_mdlog
     mkdir /data/diag_mdlog 0750 system log
+
     mkdir /data/diag_mdlog/logs 0750 log log
 
     # Setup folder for native to transfer data to NativeDropBoxAgent
@@ -137,18 +138,10 @@ on post-fs-data
     chown mot_pwric mot_pwric /sys/module/qpnp_charger/parameters/bms_chrg_capacity_temp
     chown mot_pwric mot_pwric /sys/module/qpnp_charger/parameters/chrg_timestamp
 
-    start batt_health
-
     # Motorola Charge_only_mode
     exec /system/bin/sh /system/bin/moto_com.sh
 
-service batt_health /system/bin/batt_health
-    class main
-    group mot_pwric
-
 on early-boot
-# Annotate panics with helpful information
-     exec /system/bin/apanic_annotate.sh build
 
 on boot
     # Change ownership and permission for vibrator
@@ -157,9 +150,6 @@ on boot
 
     # initialize kernel dynamic debugging settings
     copy /system/etc/debug_control.conf /sys/kernel/debug/dynamic_debug/control
-
-    # Setup folder for aplogd
-    mkdir /data/aplogd 0750 log log
 
     # Change the ownership of touch screen files for tcmd
     chown root mot_tcmd /sys/bus/i2c/drivers/synaptics_dsx_i2c/5-0020/drv_irq
@@ -229,149 +219,10 @@ on boot
     write /sys/bus/msm_subsys/devices/subsys2/restart_level related
     write /sys/bus/msm_subsys/devices/subsys3/restart_level related
 
-service ftmipcd /system/bin/ftmipcd
-    user radio
-    group radio inet qcom_diag
-    disabled
-    oneshot
-
-on property:ro.bootmode=factory
-    start ftmipcd
-
-# Power up to suspend
-on property:tcmd.suspend=1
-    stop surfaceflinger
-    stop zygote
-    stop sensors
-    write /sys/kernel/factory_gsbi12_mode/install 1
-    setprop debug.sf.nobootanimation 1
-
-# Normal to suspend
-on property:tcmd.suspend=2
-    stop surfaceflinger
-    stop zygote
-    stop sensors
-    write /sys/kernel/factory_gsbi12_mode/install 1
-    setprop debug.sf.nobootanimation 1
-
-service tcmd /system/bin/tcmd
-    class core
-    group mot_tcmd radio mot_pwric input system log camera graphics mot_accy sdcard_r sdcard_rw audio inet bluetooth wifi compass net_bt_admin mot_tombstone mot_tpapi mount net_raw net_admin media shell mot_usb nfc fm_radio qcom_diag mot_dbvc cache
-    socket local_tcmd stream 0660 mot_tcmd mot_tcmd
-    socket batch_socket stream 0600 mot_tcmd mot_tcmd
-    oneshot
-    disabled
-
-service tcmdhelp /system/bin/tcmdhelp
-    class main
-    socket tcmdhelp stream 0600 mot_tcmd mot_tcmd
-    oneshot
-    disabled
-
-on property:tcmd.start_tcmdhelp=1
-    start tcmdhelp
-
-# Backup/Restore Feature
-on property:mot.backup_restore.status="Finished"
-    start zygote
-    service mot_backup /system/bin/logwrapper /system/xbin/run_backup /system/etc/backup_targets.csv
-    disabled
-    user root
-    oneshot
-
-    service mot_restore /system/bin/logwrapper /system/xbin/run_restore /system/etc/backup_targets.csv
-    disabled
-    user root
-    oneshot
-
-on property:mot.backup_restore.action="run_backup"
-    setprop mot.backup_restore.status "Running"
-    stop zygote
-    start mot_backup
-
-on property:mot.backup_restore.action="run_restore"
-    setprop mot.backup_restore.status "Running"
-    stop zygote
-    start mot_restore
-
-on property:persist.log.aplogd.enable=1
-    start aplogd
-
-on property:persist.log.aplogd.enable=0
-    stop aplogd
-
-service aplogd /system/bin/aplogd
-    class main
-    #user log
-    #group log system sdcard_rw sdcard_r media_rw mount
-    # The user and group definitions above are intentionally disabled and left
-    # only as documentation. It actually starts as root and immediately drops
-    # to log plus those groups after preserving CAP_SYS_ADMIN, which is required
-    # for kernel logging.
-    disabled
-
 service mmi-radio-sh /system/bin/logwrapper /system/bin/sh /init.mmi.radio.sh
     class core
     user radio
     group radio
-    oneshot
-
-on property:persist.sys.diag_mdlog.on=1
-    start diag_mdlog
-
-on property:persist.sys.diag_mdlog.on=0
-    stop diag_mdlog
-
-service diag_mdlog /system/bin/diag_mdlog-wrap
-    class main
-    socket mdlog_cmd stream 0660 system diag
-    user log
-    group log sdcard_rw sdcard_r media_rw qcom_diag
-    disabled
-
-service dropboxd /system/bin/dropboxd
-    class late_start
-    user diag
-    group diag
-
-# Let init manage the bug2go-native wakelock, so that we guarantee its
-# lifecycle exactly matches that of bug2go-bugreport.  Since init sends
-# SIGKILL when stopping a service, we could not guarantee the wakelock would
-# get cleaned up if it were managed by bug2go-bugreport itself.
-on property:init.svc.bugreport=running
-    write /sys/power/wake_lock bug2go-native
-
-on property:init.svc.bugreport=stopping
-    write /sys/power/wake_unlock bug2go-native
-
-on property:init.svc.bugreport=stopped
-    write /sys/power/wake_unlock bug2go-native
-
-service bugreport /system/bin/bug2go-bugreport
-    class main
-    disabled
-    oneshot
-    keycodes 115 116 # VOLUME_UP + PWR
-
-service kpgather /system/bin/kpgather
-    class core
-    #user system
-    #group system log
-    # The user and group definitions above are intentionally disabled and left
-    # only as documentation. It actually starts as root and immediately drops
-    # to system plus those groups after preserving CAP_SYSLOG, which is
-    # required for reading kernel logs.
-    oneshot
-
-on property:installd.post_fs_data_ready=1
-    exec /system/bin/refuse
-
-on property:sys.boot_completed=1
-    start qe
-
-service mmi-boot-sh /system/bin/logwrapper /system/bin/sh /init.mmi.boot.sh
-    class core
-    user root
     oneshot
 
 service mmi-touch-sh /system/bin/logwrapper /system/bin/sh /init.mmi.touch.sh synaptics melfas
@@ -397,12 +248,6 @@ service hw_revs /system/bin/logwrapper /system/bin/hardware_revisions.sh
     group system
     oneshot
 
-service mbm_spy /system/bin/mbm_spy
-    class late_start
-    user system
-    group system
-    oneshot
-
 # DHCP service for Ethernet
 service dhcpcd_eth0 /system/bin/dhcpcd -G
    class late_start
@@ -414,27 +259,3 @@ service iprenew_eth0 /system/bin/dhcpcd -nBK
    disabled
    oneshot
 
-service atvc_core /system/bin/dbvc_atvc_property_set
-   class core
-   user mot_atvc
-   group mot_tpapi
-   oneshot
-
-service atvc /system/bin/dbvc_atvc_property_set
-   class late_start
-   user mot_atvc
-   group mot_tpapi
-   oneshot
-
-service qe /xbin/qe /system
-   class main
-   oneshot
-   disabled
-
-service ss_rdump /system/bin/subsystem_ramdump 1 0
-   class late_start
-   user radio
-   group log sdcard_rw sdcard_r diag
-
-on property:persist.sys.qc.sub.rdump.on=*
-   write /sys/module/subsystem_restart/parameters/enable_ramdumps ${persist.sys.qc.sub.rdump.on}
