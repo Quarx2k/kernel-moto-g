@@ -71,21 +71,13 @@ static struct clkctl_acpu_speed acpu_freq_tbl_8226_1p1[] = {
 };
 
 static struct clkctl_acpu_speed acpu_freq_tbl_8226_1p2[] = {
-	{ 1,  300000, PLL0,    4, 2,   650000,     650000, 4 },
-	//{ 1,  384000, ACPUPLL, 5, 2,   610000,     610000, 4 },
-	{ 1,  600000, PLL0,    4, 0,   845000,     845000, 6 },
-	{ 1,  787200, ACPUPLL, 5, 0,   855000,     855000, 6 },
-	{ 1,  998400, ACPUPLL, 5, 0,   900000,     900000, 7 },
-	{ 1, 1094400, ACPUPLL, 5, 0,   980000,     980000, 7 },
-	{ 1, 1190400, ACPUPLL, 5, 0,   1100000,    1100000, 7 },
-/*
-	{ 1, 1305600, ACPUPLL, 5, 0,   1150000,   1150000, 7 },
-	{ 1, 1344000, ACPUPLL, 5, 0,   1150000,   1150000, 7 },
-	{ 1, 1401600, ACPUPLL, 5, 0,   1150000,   1150000, 7 },
-	{ 1, 1497600, ACPUPLL, 5, 0,   1150000,   1150000, 7 },
-	{ 1, 1593600, ACPUPLL, 5, 0,   1150000,   1150000, 7 },
-*/
-
+	{ 1,  300000, PLL0,    4, 2,   CPR_CORNER_SVS,    0, 4 },
+	{ 1,  384000, ACPUPLL, 5, 2,   CPR_CORNER_SVS,    0, 4 },
+	{ 1,  600000, PLL0,    4, 0,   CPR_CORNER_NORMAL, 0, 6 },
+	{ 1,  787200, ACPUPLL, 5, 0,   CPR_CORNER_NORMAL, 0, 6 },
+	{ 1,  998400, ACPUPLL, 5, 0,   CPR_CORNER_TURBO,  0, 7 },
+	{ 1, 1094400, ACPUPLL, 5, 0,   CPR_CORNER_TURBO,  0, 7 },
+	{ 1, 1190400, ACPUPLL, 5, 0,   CPR_CORNER_TURBO,  0, 7 },
 	{ 0 }
 };
 
@@ -144,7 +136,7 @@ static struct acpuclk_drv_data drv_data = {
 	.pvs_tables = pvs_tables_8226,
 	.current_speed = &(struct clkctl_acpu_speed){ 0 },
 	.bus_scale = &bus_client_pdata,
-	.vdd_max_cpu = 1160000,
+	.vdd_max_cpu = CPR_CORNER_TURBO,
 	.src_clocks = {
 		[PLL0].name = "gpll0",
 		[ACPUPLL].name = "a7sspll",
